@@ -1,0 +1,660 @@
+------------ALU------------
+module alu (
+    input wire [3:0] a,
+    input wire [3:0] b,
+    input wire [2:0] alu_ctrl,
+    output reg [3:0] result,
+    output wire carry,
+    output wire zero
+);
+
+    // ADDER / SUBTRACTOR 
+    wire do_sub = (alu_ctrl == 3'd1); 
+    
+    // Flip bits of B if subtracting 
+    wire [3:0] bx = b ^ {4{do_sub}};  
+    
+    // 5-bit wire to get the result and catch the carry/overflow bit
+    wire [4:0] s = a + bx + do_sub;   
+
+    assign carry = (alu_ctrl == 3'd0 || alu_ctrl == 3'd1) ? s[4] : 1'b0;            
+
+    // RESULT MULTIPLEXER
+    always @(*) begin
+        case (alu_ctrl)
+            3'd0: result = s[3:0];       // ADD
+            3'd1: result = s[3:0];       // SUB
+            3'd2: result = a & b;        // AND
+            3'd3: result = a | b;        // OR
+            3'd4: result = a ^ b;        // XOR
+            3'd5: result = ~a;           // NOT
+            3'd6: result = b;            // PASS (LDI, MOV, LOAD, STORE)
+            default: result = 4'b0000;
+        endcase
+    end
+
+    // zero
+    assign zero = (result == 4'b0000);   
+
+endmodule
+
+
+
+------------DATA MEMORY------------
+module data_memory (
+    input wire clk,
+    input wire [3:0] address,
+    input wire [3:0] write_data,
+    input wire mem_we,
+    output wire [3:0] read_data
+);
+
+    // declare memory array: 16 slots, each are 12-bit
+    reg [3:0] mem [0:15];
+
+    // Combinational Read: instantly output the data at the requested address
+    assign read_data = mem[address];
+
+    // Seq Write: update memory only on the rising clock edge if enabled
+    always @(posedge clk) begin
+        if (mem_we) begin
+            mem[address] <= write_data;
+        end
+    end
+
+endmodule
+
+
+
+------------REGISTER FILE------------
+module register_file (
+    input wire clk,
+    input wire rst,
+    input wire [1:0] ra,     // Read Address A
+    input wire [1:0] rb,     // Read Address B
+    input wire [1:0] wa,     // Write Address
+    input wire [3:0] wd,     // Write Data 
+    input wire we,           // Write Enable 
+    output reg [3:0] qa,     // Data output A
+    output reg [3:0] qb      // Data output B
+);
+
+    // 4 registers (2 extra)
+    reg [3:0] r0, r1, r2, r3;
+
+    // COMBINATIONAL READ 
+    always @(*) begin
+        case(ra)
+            2'd0: qa = r0;
+            2'd1: qa = r1;
+            2'd2: qa = r2;
+            2'd3: qa = r3;
+        endcase
+        
+        case(rb)
+            2'd0: qb = r0;
+            2'd1: qb = r1;
+            2'd2: qb = r2;
+            2'd3: qb = r3;
+        endcase
+    end
+
+    // SEQUENTIAL WRITE  
+    always @(posedge clk or posedge rst) begin
+        if (rst) begin
+            // clear all memory on reset
+            r0 <= 4'd0;
+            r1 <= 4'd0;
+            r2 <= 4'd0;
+            r3 <= 4'd0;
+        end else if (we) begin
+            // write only when we is enabled
+            case(wa)
+                2'd0: r0 <= wd;
+                2'd1: r1 <= wd;
+                2'd2: r2 <= wd;
+                2'd3: r3 <= wd;
+            endcase
+        end
+    end
+
+endmodule
+
+
+
+------------PROGRAM COUNTER------------
+module program_counter (
+    input wire clk,
+    input wire rst,
+    input wire pc_en,          // enables the PC to update
+    input wire [3:0] pc_next,  // the next address to move to
+    output reg [3:0] pc_out    // The current address
+);
+
+    always @(posedge clk or posedge rst) begin
+        if (rst) begin
+            pc_out <= 4'd0;    // reset back to line 0
+        end else if (pc_en) begin
+            pc_out <= pc_next; // load the next address on the clock edge
+        end
+    end
+
+endmodule
+
+
+
+------------FLAG REGISTER------------
+module flag_register (
+    input wire clk,
+    input wire rst,
+    
+    
+    input wire zero_in,
+    input wire carry_in,
+    
+   
+    input wire zero_we,
+    input wire carry_we,
+    
+    
+    output reg zero_out,
+    output reg carry_out
+);
+
+   
+    always @(posedge clk) begin
+        if (rst) begin
+            zero_out  <= 1'b0;
+            carry_out <= 1'b0;
+        end else begin
+            if (zero_we) begin
+                zero_out <= zero_in;
+            end
+            if (carry_we) begin
+                carry_out <= carry_in;
+            end
+        end
+    end
+
+endmodule
+
+
+
+------------INSTRUCTION REGISTER------------
+module instruction_register (
+    input wire clk,
+    input wire rst,
+    input wire ir_load,          // Fixed at 1 to fetch a new instruction every clock
+    input wire flush,            // From branch unit: clears the register if a jump is taken
+    input wire [3:0] pc_in,
+    input wire [11:0] instruction_in,
+    
+    output reg [3:0] pc_out,
+    output reg [11:0] instruction_out,
+    output reg valid_out         // 0 means this slot is empty (a bubble)
+);
+
+    always @(posedge clk) begin
+        if (rst) begin
+            // Reset places control state in a known initial condition
+            pc_out          <= 4'b0000;
+            instruction_out <= 12'b0000_0000_0000; // NOP
+            valid_out       <= 1'b0;               // Pipeline is initially empty
+        end 
+        else if (flush) begin
+            // A taken jump means the fetched instruction is wrong and must be discarded
+            pc_out          <= 4'b0000;
+            instruction_out <= 12'b0000_0000_0000; // Convert to safe NOP
+            valid_out       <= 1'b0;               // Mark as a bubble
+        end 
+        else if (ir_load) begin
+            // Normal pipeline operation: pass data forward
+            pc_out          <= pc_in;
+            instruction_out <= instruction_in;
+            valid_out       <= 1'b1;               // Valid instruction loaded
+        end
+    end
+
+endmodule
+
+
+
+------------PIPELINE REGISTER------------
+module pipeline_register (
+    input wire clk,
+    input wire rst,
+    input wire flush,
+    
+    // Control signals from ID (Decoder)
+    input wire [2:0] id_alu_ctrl,
+    input wire id_alu_src_sel,
+    input wire id_wb_sel,
+    input wire id_reg_we,
+    input wire id_mem_we,
+    input wire id_zero_we,
+    input wire id_carry_we,
+    input wire id_is_jmp,
+    input wire id_is_jz,
+    
+    // Data fields from ID
+    input wire [3:0] id_pc,
+    input wire [1:0] id_rd,
+    input wire [1:0] id_rs,
+    input wire [3:0] id_imm,
+    input wire id_valid,
+    
+    // Control signals to EX
+    output reg [2:0] ex_alu_ctrl,
+    output reg ex_alu_src_sel,
+    output reg ex_wb_sel,
+    output reg ex_reg_we,
+    output reg ex_mem_we,
+    output reg ex_zero_we,
+    output reg ex_carry_we,
+    output reg ex_is_jmp,
+    output reg ex_is_jz,
+    
+    // Data fields to EX
+    output reg [3:0] ex_pc,
+    output reg [1:0] ex_rd,
+    output reg [1:0] ex_rs,
+    output reg [3:0] ex_imm,
+    output reg ex_valid
+);
+
+    always @(posedge clk) begin
+        if (rst || flush) begin
+            // Reset or flush: Load all-zero control signals to create a NOP
+            ex_alu_ctrl    <= 3'd0;
+            ex_alu_src_sel <= 1'b0;
+            ex_wb_sel      <= 1'b0;
+            ex_reg_we      <= 1'b0;
+            ex_mem_we      <= 1'b0;
+            ex_zero_we     <= 1'b0;
+            ex_carry_we    <= 1'b0;
+            ex_is_jmp      <= 1'b0;
+            ex_is_jz       <= 1'b0;
+            
+            ex_pc          <= 4'b0000;
+            ex_rd          <= 2'b00;
+            ex_rs          <= 2'b00;
+            ex_imm         <= 4'b0000;
+            ex_valid       <= 1'b0;
+        end else begin
+            // Normal operation: pass decoded signals and data into the EX stage
+            ex_alu_ctrl    <= id_alu_ctrl;
+            ex_alu_src_sel <= id_alu_src_sel;
+            ex_wb_sel      <= id_wb_sel;
+            ex_reg_we      <= id_reg_we;
+            ex_mem_we      <= id_mem_we;
+            ex_zero_we     <= id_zero_we;
+            ex_carry_we    <= id_carry_we;
+            ex_is_jmp      <= id_is_jmp;
+            ex_is_jz       <= id_is_jz;
+            
+            ex_pc          <= id_pc;
+            ex_rd          <= id_rd;
+            ex_rs          <= id_rs;
+            ex_imm         <= id_imm;
+            ex_valid       <= id_valid;
+        end
+    end
+
+endmodule
+
+
+
+------------INSTRUCTION MEMORY------------
+module instruction_memory (
+    input wire [3:0] address,
+    output wire [11:0] instruction
+);
+
+    // declare memory array, 16 slots each are 12-bit
+    reg [11:0] mem [0:15];
+
+    // start by loading the program file
+    initial begin
+        // Use $readmemh to load "program.mem" into the mem array
+        $readmemh("program.mem", mem);
+    end
+
+    // Combinational Read
+    // Wire the instruction output to instantly read the requested address
+    assign instruction = mem[address];
+
+endmodule
+
+
+
+------------MUTLIPLEXERS------------
+module mux2 (
+    input wire [3:0] in0,
+    input wire [3:0] in1,
+    input wire sel,
+    output wire [3:0] out
+);
+    assign out = sel ? in1 : in0;
+endmodule
+
+
+
+------------CONTROL UNIT------------
+module control_unit (
+    // Inputs from ID stage (Instruction Decoder)
+    input wire [3:0] opcode,
+    
+    // Inputs from EX stage (Branch Unit)
+    input wire zero_flag,
+    input wire ex_is_jmp,
+    input wire ex_is_jz,
+
+    // Outputs for ID/EX pipeline register
+    output reg [2:0] alu_ctrl,
+    output reg alu_src_sel,
+    output reg wb_sel,
+    output reg reg_we,
+    output reg mem_we,
+    output reg zero_we,
+    output reg carry_we,
+    output reg is_jmp,
+    output reg is_jz,
+
+    // Outputs to IF stage (Branch Unit decisions)
+    output reg pc_sel,
+    output reg flush
+);
+
+    // 1. INSTRUCTION DECODER (ID Stage)
+    always @(*) begin
+        // SAFE DEFAULTS (NOP state)
+        alu_ctrl    = 3'd0;
+        alu_src_sel = 1'b0;
+        wb_sel      = 1'b0;
+        reg_we      = 1'b0;
+        mem_we      = 1'b0;
+        zero_we     = 1'b0;
+        carry_we    = 1'b0;
+        is_jmp      = 1'b0;
+        is_jz       = 1'b0;
+
+        // OPCODE DECODING
+        case (opcode)
+            4'b0000: begin // ADD
+                alu_ctrl = 3'd0; reg_we = 1'b1; zero_we = 1'b1; carry_we = 1'b1;
+            end
+            4'b0001: begin // SUB
+                alu_ctrl = 3'd1; reg_we = 1'b1; zero_we = 1'b1; carry_we = 1'b1;
+            end
+            4'b0010: begin // AND
+                alu_ctrl = 3'd2; reg_we = 1'b1; zero_we = 1'b1;
+            end
+            4'b0011: begin // OR
+                alu_ctrl = 3'd3; reg_we = 1'b1; zero_we = 1'b1;
+            end
+            4'b0100: begin // XOR
+                alu_ctrl = 3'd4; reg_we = 1'b1; zero_we = 1'b1;
+            end
+            4'b0101: begin // NOT
+                alu_ctrl = 3'd5; reg_we = 1'b1; zero_we = 1'b1;
+            end
+            4'b0110: begin // LDI
+                alu_ctrl = 3'd6; alu_src_sel = 1'b1; reg_we = 1'b1;
+            end
+            4'b0111: begin // MOV
+                alu_ctrl = 3'd6; reg_we = 1'b1;
+            end
+            4'b1000: begin // LOAD
+                alu_ctrl = 3'd6; alu_src_sel = 1'b1; wb_sel = 1'b1; reg_we = 1'b1;
+            end
+            4'b1001: begin // STORE
+                alu_ctrl = 3'd6; alu_src_sel = 1'b1; mem_we = 1'b1;
+            end
+            4'b1010: begin // JMP
+                is_jmp = 1'b1;
+            end
+            4'b1011: begin // JZ
+                is_jz = 1'b1;
+            end
+            default: begin
+                // Reserved opcodes remain safely at the default NOP state
+            end
+        endcase
+    end
+
+    // 2. BRANCH UNIT (EX Stage)
+    always @(*) begin
+        if (ex_is_jmp) begin
+            // Unconditional jump taken
+            pc_sel = 1'b1;
+            flush  = 1'b1;
+        end else if (ex_is_jz && zero_flag) begin
+            // Conditional jump taken
+            pc_sel = 1'b1;
+            flush  = 1'b1;
+        end else begin
+            // No jump or condition not met
+            pc_sel = 1'b0;
+            flush  = 1'b0;
+        end
+    end
+
+endmodule
+
+
+
+------------TOP CPU MODULE------------
+module cpu_top (
+    input wire clk,
+    input wire rst,
+    
+    output wire [3:0] pc_out,
+    output wire [11:0] instr_out,
+    output wire [3:0] alu_out,
+    output wire [3:0] wb_data_out,
+    output wire zero_out,
+    output wire carry_out
+);
+
+    // ==========================================
+    // Wires Declaration
+    // ==========================================
+    
+    // STAGE 1: IF (Fetch) Wires
+    wire [3:0] if_pc, if_pc_next;
+    wire [11:0] if_instr;
+    wire ex_pc_sel, ex_flush; 
+    wire ex_is_jmp, ex_is_jz;
+
+    // STAGE 2: ID (Decode) Wires
+    wire [3:0] id_pc;
+    wire [11:0] id_instr;
+    wire id_valid;
+    wire [2:0] id_alu_ctrl; 
+    wire id_alu_src_sel;
+    wire id_mem_we;
+    wire id_wb_sel;
+    wire id_reg_we;
+    wire id_zero_we;
+    wire id_carry_we;
+    wire id_is_jmp;
+    wire id_is_jz;
+
+    // STAGE 3: EX (Execute) Wires 
+    wire [3:0] ex_pc;
+    wire [2:0] ex_alu_ctrl; 
+    wire [3:0] ex_qa;          // Data coming from Register File Port A
+    wire [3:0] ex_qb;          // Data coming from Register File Port B
+    wire [3:0] ex_imm;         // Immediate value extracted from instruction
+    wire ex_alu_src_sel;       // Control signal for Operand MUX
+    wire [3:0] ex_alu_b;       // Output of OP MUX, going into ALU Port B
+    wire [3:0] ex_alu_result;  // Math result leaving the ALU
+    wire ex_carry;             // Carry flag leaving the ALU
+    wire ex_zero;              // Zero flag leaving the ALU
+    wire ex_mem_we;            // Control signal to enable RAM write
+    wire [3:0] ex_mem_read_data; // Data leaving the Data Memory
+    wire ex_wb_sel;            // Control signal for Write-Back MUX
+    wire [3:0] ex_wb_data;     // Output of WB MUX, going back to Register File
+    wire ex_reg_we;            // Control signal to enable Register File write
+    wire [1:0] ex_wa;          // Write Address for Register File
+    wire ex_zero_we;           // Control signal to enable Zero Flag write
+    wire ex_carry_we;          // Control signal to enable Carry Flag write
+    wire [1:0] ex_rs;
+
+    // Output assignments to view in tb
+    assign pc_out = if_pc;
+    assign instr_out = if_instr;
+    assign alu_out = ex_alu_result;
+    assign wb_data_out = ex_wb_data;
+    // Removed the direct assign for zero_out and carry_out here so the register can drive them
+
+    // ==========================================
+    // Module Instantiation
+    // ==========================================
+
+    // --- STAGE 1: FETCH ---
+    wire [3:0] pc_plus_1;
+    assign pc_plus_1 = if_pc + 4'd1;
+
+    mux2 pc_mux (
+        .in0(pc_plus_1),
+        .in1(ex_imm),       // Jump address comes from the EX stage immediate
+        .sel(ex_pc_sel),
+        .out(if_pc_next)
+    );
+    program_counter PC (
+        .clk(clk), .rst(rst), .pc_en(1'b1),
+        .pc_next(if_pc_next), .pc_out(if_pc)
+    );
+    
+    instruction_memory IMEM (
+        .address(if_pc), .instruction(if_instr)
+    );
+
+    // --- PIPELINE BOUNDARY: IF/ID REGISTER ---
+    instruction_register IF_ID (
+        .clk(clk), .rst(rst), .ir_load(1'b1), 
+        .flush(ex_flush), 
+        .pc_in(if_pc), .instruction_in(if_instr),
+        .pc_out(id_pc), .instruction_out(id_instr), .valid_out(id_valid)
+    );
+
+    // --- STAGE 2: DECODE ---
+    control_unit CU (
+        .opcode(id_instr[11:8]), 
+        .zero_flag(zero_out), .ex_is_jmp(ex_is_jmp), .ex_is_jz(ex_is_jz),
+        .alu_ctrl(id_alu_ctrl),
+        .alu_src_sel(id_alu_src_sel),
+        .mem_we(id_mem_we),
+        .wb_sel(id_wb_sel),
+        .reg_we(id_reg_we),
+        .zero_we(id_zero_we),
+        .carry_we(id_carry_we),
+        .is_jmp(id_is_jmp),     // Drives ID/EX register
+        .is_jz(id_is_jz),       // Drives ID/EX register
+        .pc_sel(ex_pc_sel),     // Drives PC MUX
+        .flush(ex_flush)        // Flushes pipeline registers
+    );
+
+    // --- PIPELINE BOUNDARY: ID/EX REGISTER ---
+    pipeline_register ID_EX (
+        .clk(clk), .rst(rst), .flush(ex_flush),
+        
+        // Inputs from ID stage
+        .id_alu_ctrl(id_alu_ctrl), 
+        .id_alu_src_sel(id_alu_src_sel),
+        .id_wb_sel(id_wb_sel),
+
+        // If id_valid is 0, these signals are forced to 0, preventing ghost execution.
+        .id_reg_we(id_reg_we & id_valid),
+        .id_mem_we(id_mem_we & id_valid),
+        .id_zero_we(id_zero_we & id_valid),
+        .id_carry_we(id_carry_we & id_valid),
+        .id_is_jmp(id_is_jmp & id_valid),
+        .id_is_jz(id_is_jz & id_valid),
+        
+        .id_pc(id_pc),
+        .id_rd(id_instr[7:6]),
+        .id_rs(id_instr[5:4]),
+        .id_imm(id_instr[3:0]),
+        .id_valid(id_valid),
+        
+        // Outputs to EX stage 
+        .ex_alu_ctrl(ex_alu_ctrl),
+        .ex_alu_src_sel(ex_alu_src_sel),
+        .ex_wb_sel(ex_wb_sel),
+        .ex_reg_we(ex_reg_we),
+        .ex_mem_we(ex_mem_we),
+        .ex_zero_we(ex_zero_we),
+        .ex_carry_we(ex_carry_we),
+        .ex_is_jmp(ex_is_jmp),
+        .ex_is_jz(ex_is_jz),
+        .ex_pc(ex_pc),
+        .ex_rd(ex_wa),          
+        .ex_rs(ex_rs),               
+        .ex_imm(ex_imm),
+        .ex_valid()             
+    );
+    // --- STAGE 3: EXECUTE ---
+
+    // 1. Register File
+    register_file RF (
+        .clk(clk),
+        .rst(rst),
+        .ra(ex_wa),    
+        .rb(ex_rs),    
+        .wa(ex_wa),            
+        .wd(ex_wb_data),       
+        .we(ex_reg_we),        
+        .qa(ex_qa),
+        .qb(ex_qb)
+    );
+
+    // 2. Operand MUX 
+    mux2 operand_mux (
+        .in0(ex_qb),
+        .in1(ex_imm),
+        .sel(ex_alu_src_sel),
+        .out(ex_alu_b)
+    );
+    
+    // 3. ALU
+    alu execution_alu (
+        .a(ex_qa),
+        .b(ex_alu_b),
+        .alu_ctrl(ex_alu_ctrl),
+        .result(ex_alu_result),
+        .carry(ex_carry),
+        .zero(ex_zero)
+    );
+
+    // 4. Data Memory
+    data_memory RAM (
+        .clk(clk),
+        .address(ex_alu_result), 
+        .write_data(ex_qa),      
+        .mem_we(ex_mem_we),
+        .read_data(ex_mem_read_data)
+    );
+
+    // 5. Write-Back MUX 
+    mux2 writeback_mux (
+        .in0(ex_alu_result),
+        .in1(ex_mem_read_data),
+        .sel(ex_wb_sel),
+        .out(ex_wb_data)
+    );
+
+    // 6. Flag Register
+    flag_register FR (
+        .clk(clk),
+        .rst(rst),
+        .zero_in(ex_zero),          // Raw combinational zero from ALU
+        .carry_in(ex_carry),        // Raw combinational carry from ALU
+        .zero_we(ex_zero_we),       // Control signal to update zero flag
+        .carry_we(ex_carry_we),     // Control signal to update carry flag
+        .zero_out(zero_out),        // Safely latched output directly to top-level port
+        .carry_out(carry_out)       // Safely latched output directly to top-level port
+    );
+
+endmodule
