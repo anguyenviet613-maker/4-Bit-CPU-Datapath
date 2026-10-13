@@ -1,0 +1,40 @@
+`timescale 1ns / 1ps
+
+module alu (
+    input wire [3:0] a,
+    input wire [3:0] b,
+    input wire [2:0] alu_ctrl,
+    output reg [3:0] result,
+    output wire carry,
+    output wire zero
+);
+
+    // ADDER / SUBTRACTOR 
+    wire do_sub = (alu_ctrl == 3'd1); 
+    
+    // Flip bits of B if subtracting 
+    wire [3:0] bx = b ^ {4{do_sub}};  
+    
+    // 5-bit wire to get the result and catch the carry/overflow bit
+    wire [4:0] s = a + bx + do_sub;   
+
+    assign carry = (alu_ctrl == 3'd0 || alu_ctrl == 3'd1) ? s[4] : 1'b0;            
+
+    // RESULT MULTIPLEXER
+    always @(*) begin
+        case (alu_ctrl)
+            3'd0: result = s[3:0];       // ADD
+            3'd1: result = s[3:0];       // SUB
+            3'd2: result = a & b;        // AND
+            3'd3: result = a | b;        // OR
+            3'd4: result = a ^ b;        // XOR
+            3'd5: result = ~a;           // NOT
+            3'd6: result = b;            // PASS (LDI, MOV, LOAD, STORE)
+            default: result = 4'b0000;
+        endcase
+    end
+
+    // zero
+    assign zero = (result == 4'b0000);   
+
+endmodule
